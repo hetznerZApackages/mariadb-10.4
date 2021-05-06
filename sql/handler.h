@@ -2,7 +2,7 @@
 #define HANDLER_INCLUDED
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -1725,6 +1725,12 @@ handlerton *ha_default_tmp_handlerton(THD *thd);
 /* can be replicated by wsrep replication provider plugin */
 #define HTON_WSREP_REPLICATION (1 << 13)
 
+/*
+  Table requires and close and reopen after truncate
+  If the handler has HTON_CAN_RECREATE, this flag is not used
+*/
+#define HTON_REQUIRES_CLOSE_AFTER_TRUNCATE (1 << 18)
+
 class Ha_trx_info;
 
 struct THD_TRANS
@@ -2086,7 +2092,7 @@ public:
 
 struct Table_scope_and_contents_source_pod_st // For trivial members
 {
-  CHARSET_INFO *table_charset;
+  CHARSET_INFO *alter_table_convert_to_charset;
   LEX_CUSTRING tabledef_version;
   LEX_CSTRING connect_string;
   LEX_CSTRING comment;
@@ -2231,7 +2237,7 @@ struct HA_CREATE_INFO: public Table_scope_and_contents_source_st,
     DBUG_ASSERT(cs);
     if (check_conflicting_charset_declarations(cs))
       return true;
-    table_charset= default_table_charset= cs;
+    alter_table_convert_to_charset= default_table_charset= cs;
     used_fields|= (HA_CREATE_USED_CHARSET | HA_CREATE_USED_DEFAULT_CHARSET);  
     return false;
   }

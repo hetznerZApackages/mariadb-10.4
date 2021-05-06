@@ -1,6 +1,6 @@
 /*
   Copyright (c) 2005, 2019, Oracle and/or its affiliates.
-  Copyright (c) 2009, 2020, MariaDB
+  Copyright (c) 2009, 2021, MariaDB
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -6461,6 +6461,7 @@ int ha_partition::multi_range_read_init(RANGE_SEQ_IF *seq,
   DBUG_ENTER("ha_partition::multi_range_read_init");
   DBUG_PRINT("enter", ("partition this: %p", this));
 
+  eq_range= 0;
   m_seq_if= seq;
   m_seq= seq->init(seq_init_param, n_ranges, mrr_mode);
   if (unlikely((error= multi_range_key_create_key(seq, m_seq))))
@@ -9060,7 +9061,6 @@ int ha_partition::extra(enum ha_extra_function operation)
   case HA_EXTRA_STARTING_ORDERED_INDEX_SCAN:
   case HA_EXTRA_BEGIN_ALTER_COPY:
   case HA_EXTRA_END_ALTER_COPY:
-  case HA_EXTRA_FAKE_START_STMT:
     DBUG_RETURN(loop_partitions(extra_cb, &operation));
   default:
   {

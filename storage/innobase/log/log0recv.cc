@@ -972,7 +972,8 @@ fail:
 			DBUG_EXECUTE_IF("log_checksum_mismatch", { cksum = crc + 1; });
 
 			if (crc != cksum) {
-				ib::error() << "Invalid log block checksum."
+				ib::error_or_warn(srv_operation != SRV_OPERATION_BACKUP)
+					    << "Invalid log block checksum."
 					    << " block: " << block_number
 					    << " checkpoint no: "
 					    << log_block_get_checkpoint_no(buf)
@@ -2302,8 +2303,6 @@ void recv_apply_hashed_log_recs(bool last_batch)
 
 	recv_no_ibuf_operations
 		= !last_batch || is_mariabackup_restore_or_export();
-
-	ut_d(recv_no_log_write = recv_no_ibuf_operations);
 
 	if (ulint n = recv_sys.n_addrs) {
 		if (!log_sys.log.subformat && !srv_force_recovery
@@ -3872,6 +3871,7 @@ recv_recovery_from_checkpoint_start(lsn_t flush_lsn)
 
 	recv_sys.apply_log_recs = true;
 	recv_no_ibuf_operations = is_mariabackup_restore_or_export();
+	ut_d(recv_no_log_write = recv_no_ibuf_operations);
 
 	mutex_exit(&recv_sys.mutex);
 

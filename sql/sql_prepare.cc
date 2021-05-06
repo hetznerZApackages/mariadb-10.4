@@ -4217,6 +4217,15 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
           thd->is_error() ||
           init_param_array(this));
 
+  if (thd->security_ctx->password_expired &&
+      lex->sql_command != SQLCOM_SET_OPTION)
+  {
+    thd->restore_backup_statement(this, &stmt_backup);
+    thd->restore_active_arena(this, &stmt_backup);
+    thd->stmt_arena= old_stmt_arena;
+    my_error(ER_MUST_CHANGE_PASSWORD, MYF(0));
+    DBUG_RETURN(true);
+  }
   lex->set_trg_event_type_for_tables();
 
   /*
@@ -4241,6 +4250,16 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
   */
   MDL_savepoint mdl_savepoint= thd->mdl_context.mdl_savepoint();
 
+  /*
+    Set variables specified by
+      SET STATEMENT var1=value1 [, var2=value2, ...] FOR <statement>
+    clause for duration of prepare phase. Original values of variable
+    listed in the SET STATEMENT clause is restored right after return
+    from the function check_prepared_statement()
+  */
+  if (likely(error == 0))
+    error= run_set_statement_if_requested(thd, lex);
+
   /* 
    The only case where we should have items in the thd->free_list is
    after stmt->set_params_from_vars(), which may in some cases create
@@ -4258,6 +4277,12 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
     */
     lex->context_analysis_only&= ~CONTEXT_ANALYSIS_ONLY_PREPARE;
   }
+
+  /*
+    Restore original values of variables modified on handling
+    SET STATEMENT clause.
+  */
+  thd->lex->restore_set_statement_var();
 
   /* The order is important */
   lex->unit.cleanup();

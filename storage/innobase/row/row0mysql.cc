@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2000, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2020, MariaDB Corporation.
+Copyright (c) 2015, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -689,6 +689,7 @@ row_mysql_handle_errors(
 	dberr_t	err;
 
 	DBUG_ENTER("row_mysql_handle_errors");
+	DEBUG_SYNC_C("row_mysql_handle_errors");
 
 handle_new_error:
 	err = trx->error_state;
@@ -963,9 +964,6 @@ row_create_prebuilt(
 
 	prebuilt->fts_doc_id_in_read_set = 0;
 	prebuilt->blob_heap = NULL;
-
-	prebuilt->m_no_prefetch = false;
-	prebuilt->m_read_virtual_key = false;
 
 	DBUG_RETURN(prebuilt);
 }
@@ -1804,12 +1802,11 @@ row_update_for_mysql(row_prebuilt_t* prebuilt)
 
 	clust_index = dict_table_get_first_index(table);
 
-	if (prebuilt->pcur->btr_cur.index == clust_index) {
-		btr_pcur_copy_stored_position(node->pcur, prebuilt->pcur);
-	} else {
-		btr_pcur_copy_stored_position(node->pcur,
-					      prebuilt->clust_pcur);
-	}
+	btr_pcur_copy_stored_position(node->pcur,
+				      prebuilt->pcur->btr_cur.index
+				      == clust_index
+				      ? prebuilt->pcur
+				      : prebuilt->clust_pcur);
 
 	ut_a(node->pcur->rel_pos == BTR_PCUR_ON);
 
@@ -2027,7 +2024,8 @@ row_unlock_for_mysql(
 			rec_offs* offsets				= offsets_;
 
 			rec_offs_init(offsets_);
-			offsets = rec_get_offsets(rec, index, offsets, true,
+			offsets = rec_get_offsets(rec, index, offsets,
+						  index->n_core_fields,
 						  ULINT_UNDEFINED, &heap);
 
 			rec_trx_id = row_get_rec_trx_id(rec, index, offsets);
@@ -4791,7 +4789,7 @@ func_exit:
 
 	rec = buf + mach_read_from_4(buf);
 
-	offsets = rec_get_offsets(rec, index, offsets_, true,
+	offsets = rec_get_offsets(rec, index, offsets_, index->n_core_fields,
 				  ULINT_UNDEFINED, &heap);
 
 	if (prev_entry != NULL) {

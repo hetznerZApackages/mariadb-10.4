@@ -1,8 +1,8 @@
-mariadb-10.4 (1:10.4.18+maria~stretch) stretch; urgency=medium
+mariadb-10.4 (1:10.4.0+deb9hetz1~exp1) stretch-hetz-experimental; urgency=low
 
-  * Automatic build with MariaDB build.
+  * Initial xneelo version
 
- -- Buildbot <buildbot@debian-9-stretch-amd64>  Thu, 18 Feb 2021 18:24:55 -0500
+ -- Walter Kleynscheldt <walter.kleynscheldt@hetzner.co.za>  Thu, 06 May 2021 21:39:27 +0200
 
 mariadb-10.4 (1:10.4.0) unstable; urgency=low
 

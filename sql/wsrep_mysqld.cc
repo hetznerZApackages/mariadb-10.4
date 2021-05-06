@@ -132,6 +132,18 @@ uint  wsrep_ignore_apply_errors= 0;
  */
 
 /*
+ * Cached variables
+ */
+
+// Whether the Galera write-set replication provider is set
+// wsrep_provider && strcmp(wsrep_provider, WSREP_NONE)
+bool WSREP_PROVIDER_EXISTS_;
+
+// Whether the Galera write-set replication is enabled
+// global_system_variables.wsrep_on && WSREP_PROVIDER_EXISTS_
+bool WSREP_ON_;
+
+/*
  * Other wsrep global variables.
  */
 
@@ -860,9 +872,6 @@ void wsrep_init_startup (bool sst_first)
 {
   if (wsrep_init()) unireg_abort(1);
 
-  wsrep_thr_lock_init(wsrep_thd_is_BF, wsrep_thd_bf_abort,
-                      wsrep_debug, wsrep_convert_LOCK_to_trx, wsrep_on);
-
   /*
     Pre-initialize global_system_variables.table_plugin with a dummy engine
     (placeholder) required during the initialization of wsrep threads (THDs).
@@ -1179,10 +1188,17 @@ void wsrep_keys_free(wsrep_key_arr_t* key_arr)
     key_arr->keys_len= 0;
 }
 
-void
+/*!
+ * @param thd    thread
+ * @param tables list of tables
+ * @param keys   prepared keys
+
+ * @return true if parent table append was successfull, otherwise false.
+*/
+bool
 wsrep_append_fk_parent_table(THD* thd, TABLE_LIST* tables, wsrep::key_array* keys)
 {
-  if (!WSREP(thd) || !WSREP_CLIENT(thd)) return;
+    bool fail= false;
     TABLE_LIST *table;
 
     thd->release_transactional_locks();
@@ -1193,6 +1209,8 @@ wsrep_append_fk_parent_table(THD* thd, TABLE_LIST* tables, wsrep::key_array* key
          open_tables(thd, &tables, &counter, MYSQL_OPEN_FORCE_SHARED_HIGH_PRIO_MDL))
     {
       WSREP_DEBUG("unable to open table for FK checks for %s", thd->query());
+      fail= true;
+      goto exit;
     }
 
     for (table= tables; table; table= table->next_local)
@@ -1214,14 +1232,44 @@ wsrep_append_fk_parent_table(THD* thd, TABLE_LIST* tables, wsrep::key_array* key
       }
     }
 
+exit:
     /* close the table and release MDL locks */
     close_thread_tables(thd);
     thd->mdl_context.rollback_to_savepoint(mdl_savepoint);
     for (table= tables; table; table= table->next_local)
     {
       table->table= NULL;
+      table->next_global= NULL;
       table->mdl_request.ticket= NULL;
     }
+
+    return fail;
+}
+
+bool wsrep_reload_ssl()
+{
+  try
+  {
+    std::string opts= Wsrep_server_state::instance().provider().options();
+    if (opts.find("socket.ssl_reload") == std::string::npos)
+    {
+      WSREP_DEBUG("Option `socket.ssl_reload` not found in parameters.");
+      return false;
+    }
+    const std::string reload_ssl_param("socket.ssl_reload=1");
+    enum wsrep::provider::status ret= Wsrep_server_state::instance().provider().options(reload_ssl_param);
+    if (ret)
+    {
+      WSREP_ERROR("Set options returned %d", ret);
+      return true;
+    }
+    return false;
+  }
+  catch (...)
+  {
+    WSREP_ERROR("Failed to get provider options");
+    return true;
+  }
 }
 
 /*!
@@ -1960,7 +2008,7 @@ static int wsrep_TOI_begin(THD *thd, const char *db, const char *table,
 {
   DBUG_ASSERT(thd->variables.wsrep_OSU_method == WSREP_OSU_TOI);
 
-  WSREP_DEBUG("TOI Begin");
+  WSREP_DEBUG("TOI Begin for %s", WSREP_QUERY(thd));
   if (wsrep_can_run_in_toi(thd, db, table, table_list) == false)
   {
     WSREP_DEBUG("No TOI for %s", WSREP_QUERY(thd));
@@ -2050,22 +2098,20 @@ static void wsrep_TOI_end(THD *thd) {
   wsrep_to_isolation--;
   wsrep::client_state& client_state(thd->wsrep_cs());
   DBUG_ASSERT(wsrep_thd_is_local_toi(thd));
-  WSREP_DEBUG("TO END: %lld: %s", client_state.toi_meta().seqno().get(),
-              WSREP_QUERY(thd));
 
-  if (wsrep_thd_is_local_toi(thd))
+  wsrep_set_SE_checkpoint(client_state.toi_meta().gtid());
+
+  int ret= client_state.leave_toi_local(wsrep::mutable_buffer());
+
+  if (!ret)
   {
-    wsrep_set_SE_checkpoint(client_state.toi_meta().gtid());
-    int ret= client_state.leave_toi_local(wsrep::mutable_buffer());
-    if (!ret)
-    {
-      WSREP_DEBUG("TO END: %lld", client_state.toi_meta().seqno().get());
-    }
-    else
-    {
-      WSREP_WARN("TO isolation end failed for: %d, schema: %s, sql: %s",
-                 ret, (thd->db.str ? thd->db.str : "(null)"), WSREP_QUERY(thd));
-    }
+    WSREP_DEBUG("TO END: %lld: %s",
+                client_state.toi_meta().seqno().get(), WSREP_QUERY(thd));
+  }
+  else
+  {
+    WSREP_WARN("TO isolation end failed for: %d, sql: %s",
+                ret, WSREP_QUERY(thd));
   }
 }
 
@@ -2145,6 +2191,13 @@ int wsrep_to_isolation_begin(THD *thd, const char *db_, const char *table_,
     thd->variables.auto_increment_increment= 1;
   }
 
+  /*
+    TOI operations will ignore provided lock_wait_timeout and restore it
+    after operation is done.
+   */
+  thd->variables.saved_lock_wait_timeout= thd->variables.lock_wait_timeout;
+  thd->variables.lock_wait_timeout= LONG_TIMEOUT;
+
   if (thd->variables.wsrep_on && wsrep_thd_is_local(thd))
   {
     switch (thd->variables.wsrep_OSU_method) {
@@ -2179,6 +2232,9 @@ void wsrep_to_isolation_end(THD *thd)
 {
   DBUG_ASSERT(wsrep_thd_is_local_toi(thd) ||
               wsrep_thd_is_in_rsu(thd));
+
+  thd->variables.lock_wait_timeout= thd->variables.saved_lock_wait_timeout;
+
   if (wsrep_thd_is_local_toi(thd))
   {
     DBUG_ASSERT(thd->variables.wsrep_OSU_method == WSREP_OSU_TOI);

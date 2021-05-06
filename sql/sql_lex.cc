@@ -2433,6 +2433,7 @@ void st_select_lex::init_query()
   is_service_select= 0;
   parsing_place= NO_MATTER;
   save_parsing_place= NO_MATTER;
+  context_analysis_place= NO_MATTER;
   exclude_from_table_unique_test= no_wrap_view_item= FALSE;
   nest_level= 0;
   link_next= 0;
@@ -2487,6 +2488,8 @@ void st_select_lex::init_select()
   with_dep= 0;
   join= 0;
   lock_type= TL_READ_DEFAULT;
+  save_many_values.empty();
+  save_insert_list= 0;
   tvc= 0;
   in_funcs.empty();
   curr_tvc_name= 0;
@@ -2530,6 +2533,8 @@ void st_select_lex_node::add_slave(st_select_lex_node *slave_arg)
   {
     slave= slave_arg;
     slave_arg->master= this;
+    slave->prev= &master->slave;
+    slave->next= 0;
   }
 }
 
@@ -2549,6 +2554,27 @@ void st_select_lex_node::link_chain_down(st_select_lex_node *first)
   }
   first->prev= &slave;
   slave= first;
+}
+
+/*
+  @brief
+    Substitute this node in select tree for a newly creates node
+
+  @param  subst the node to substitute for
+
+  @details
+    The function substitute this node in the select tree for a newly
+    created node subst. This node is just removed from the tree but all
+    its link fields and the attached sub-tree remain untouched.
+*/
+
+void st_select_lex_node::substitute_in_tree(st_select_lex_node *subst)
+{
+  if ((subst->next= next))
+    next->prev= &subst->next;
+  subst->prev= prev;
+  (*prev)= subst;
+  subst->master= master;
 }
 
 /*
@@ -2781,7 +2807,7 @@ void st_select_lex_unit::exclude_tree()
 */
 
 bool st_select_lex::mark_as_dependent(THD *thd, st_select_lex *last,
-                                      Item *dependency)
+                                      Item_ident *dependency)
 {
 
   DBUG_ASSERT(this != last);
@@ -2789,10 +2815,14 @@ bool st_select_lex::mark_as_dependent(THD *thd, st_select_lex *last,
   /*
     Mark all selects from resolved to 1 before select where was
     found table as depended (of select where was found table)
+
+    We move by name resolution context, bacause during merge can some select
+    be excleded from SELECT tree
   */
-  SELECT_LEX *s= this;
+  Name_resolution_context *c= &this->context;
   do
   {
+    SELECT_LEX *s= c->select_lex;
     if (!(s->uncacheable & UNCACHEABLE_DEPENDENT_GENERATED))
     {
       // Select is dependent of outer select
@@ -2814,7 +2844,7 @@ bool st_select_lex::mark_as_dependent(THD *thd, st_select_lex *last,
     if (subquery_expr && subquery_expr->mark_as_dependent(thd, last, 
                                                           dependency))
       return TRUE;
-  } while ((s= s->outer_select()) != last && s != 0);
+  } while ((c= c->outer_context) != NULL && (c->select_lex != last));
   is_correlated= TRUE;
   this->master_unit()->item->is_correlated= TRUE;
   return FALSE;
@@ -5014,6 +5044,27 @@ bool st_select_lex::save_prep_leaf_tables(THD *thd)
   }
 
   return FALSE;
+}
+
+
+/**
+  Set exclude_from_table_unique_test for selects of this select and all selects
+  belonging to the underlying units of derived tables or views
+*/
+
+void st_select_lex::set_unique_exclude()
+{
+  exclude_from_table_unique_test= TRUE;
+  for (SELECT_LEX_UNIT *unit= first_inner_unit();
+       unit;
+       unit= unit->next_unit())
+  {
+    if (unit->derived && unit->derived->is_view_or_derived())
+    {
+      for (SELECT_LEX *sl= unit->first_select(); sl; sl= sl->next_select())
+        sl->set_unique_exclude();
+    }
+  }
 }
 
 
@@ -8874,7 +8925,6 @@ bool LEX::last_field_generated_always_as_row_end()
                                                          VERS_SYS_END_FLAG);
 }
 
-
 void st_select_lex_unit::reset_distinct()
 {
   union_distinct= NULL;
@@ -8887,6 +8937,20 @@ void st_select_lex_unit::reset_distinct()
       union_distinct= sl;
     }
   }
+}
+
+
+void LEX::save_values_list_state()
+{
+  current_select->save_many_values= many_values;
+  current_select->save_insert_list= insert_list;
+}
+
+
+void LEX::restore_values_list_state()
+{
+  many_values= current_select->save_many_values;
+  insert_list= current_select->save_insert_list;
 }
 
 
@@ -9349,7 +9413,7 @@ SELECT_LEX *LEX::parsed_subselect(SELECT_LEX_UNIT *unit)
               (curr_sel == NULL && current_select == &builtin_select));
   if (curr_sel)
   {
-    curr_sel->register_unit(unit, &curr_sel->context);
+    curr_sel->register_unit(unit, context_stack.head());
     curr_sel->add_statistics(unit);
   }
 
@@ -9386,6 +9450,7 @@ bool LEX::parsed_insert_select(SELECT_LEX *first_select)
 bool LEX::parsed_TVC_start()
 {
   SELECT_LEX *sel;
+  save_values_list_state();
   many_values.empty();
   insert_list= 0;
   if (!(sel= alloc_select(TRUE)) ||
@@ -9399,14 +9464,13 @@ bool LEX::parsed_TVC_start()
 
 SELECT_LEX *LEX::parsed_TVC_end()
 {
-
   SELECT_LEX *res= pop_select(); // above TVC select
   if (!(res->tvc=
         new (thd->mem_root) table_value_constr(many_values,
           res,
           res->options)))
     return NULL;
-  many_values.empty();
+  restore_values_list_state();
   return res;
 }
 
